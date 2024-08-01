@@ -48,46 +48,45 @@ class VisionTower(nn.Module):
         num_new_tokens = int((resolution // patch_size) ** 2)
 
         old_embeddings = embeddings.position_embedding
-        match interpolate_mode:
-            case "linear":
-                ## Step 1: Calculate the corresponding patch ID (pid) in the current resolution (M patches) based on the target resolution (N patches). Formula: pid = pid / N * M
-                ## Step 2:  Obtain new embeddings by interpolating between the embeddings of the two nearest calculated patch IDs. Formula: new_embeds = (pid - floor(pid)) * embeds[ceil(pid)] + (ceil(pid) - pid) * embeds[floor(pid)]
-                import torch
-                import torch.nn as nn
+        if interpolate_mode == "linear":
+            ## Step 1: Calculate the corresponding patch ID (pid) in the current resolution (M patches) based on the target resolution (N patches). Formula: pid = pid / N * M
+            ## Step 2:  Obtain new embeddings by interpolating between the embeddings of the two nearest calculated patch IDs. Formula: new_embeds = (pid - floor(pid)) * embeds[ceil(pid)] + (ceil(pid) - pid) * embeds[floor(pid)]
+            import torch
+            import torch.nn as nn
 
-                if is_deepspeed_zero3_enabled():
-                    import deepspeed
+            if is_deepspeed_zero3_enabled():
+                import deepspeed
 
-                    with deepspeed.zero.GatheredParameters([old_embeddings.weight], modifier_rank=None):
-                        old_num_tokens, old_embedding_dim = old_embeddings.weight.size()
-                else:
+                with deepspeed.zero.GatheredParameters([old_embeddings.weight], modifier_rank=None):
                     old_num_tokens, old_embedding_dim = old_embeddings.weight.size()
-                new_embeddings = nn.Embedding(
-                    num_new_tokens,
-                    old_embedding_dim,
-                    dtype=old_embeddings.weight.dtype,
-                    device=old_embeddings.weight.device,
-                )
-                mapped_indices = (
-                    torch.arange(num_new_tokens).to(old_embeddings.weight.device)
-                    / (num_new_tokens - 1)
-                    * (old_num_tokens - 1)
-                )
-                floor_indices = torch.clamp(mapped_indices.floor().long(), min=0, max=old_num_tokens - 1)
-                ceil_indices = torch.clamp(mapped_indices.ceil().long(), min=0, max=old_num_tokens - 1)
-                if is_deepspeed_zero3_enabled():
-                    params = [old_embeddings.weight, new_embeddings.weight]
-                    with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
-                        interpolated_embeds = (mapped_indices - floor_indices)[:, None] * old_embeddings.weight.data[
-                            ceil_indices, :
-                        ] + (ceil_indices - mapped_indices)[:, None] * old_embeddings.weight.data[floor_indices, :]
-                else:
+            else:
+                old_num_tokens, old_embedding_dim = old_embeddings.weight.size()
+            new_embeddings = nn.Embedding(
+                num_new_tokens,
+                old_embedding_dim,
+                dtype=old_embeddings.weight.dtype,
+                device=old_embeddings.weight.device,
+            )
+            mapped_indices = (
+                torch.arange(num_new_tokens).to(old_embeddings.weight.device)
+                / (num_new_tokens - 1)
+                * (old_num_tokens - 1)
+            )
+            floor_indices = torch.clamp(mapped_indices.floor().long(), min=0, max=old_num_tokens - 1)
+            ceil_indices = torch.clamp(mapped_indices.ceil().long(), min=0, max=old_num_tokens - 1)
+            if is_deepspeed_zero3_enabled():
+                params = [old_embeddings.weight, new_embeddings.weight]
+                with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
                     interpolated_embeds = (mapped_indices - floor_indices)[:, None] * old_embeddings.weight.data[
                         ceil_indices, :
                     ] + (ceil_indices - mapped_indices)[:, None] * old_embeddings.weight.data[floor_indices, :]
-                new_embeddings.weight.data = interpolated_embeds
-            case _:
-                raise NotImplementedError
+            else:
+                interpolated_embeds = (mapped_indices - floor_indices)[:, None] * old_embeddings.weight.data[
+                    ceil_indices, :
+                ] + (ceil_indices - mapped_indices)[:, None] * old_embeddings.weight.data[floor_indices, :]
+            new_embeddings.weight.data = interpolated_embeds
+        else:
+            raise NotImplementedError
 
         if hasattr(old_embeddings, "_hf_hook"):
             hook = old_embeddings._hf_hook
